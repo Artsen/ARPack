@@ -4,5 +4,5 @@
 permission to assess.
 
 If you discover a vulnerability in the code:
-- Email: security@yourdomain.example (or open a private GitHub advisory)
+- Email: crafts.john.86+ARPack-security@gmail.com (or open a private GitHub advisory)
 - Please allow us time to respond before public disclosure.
