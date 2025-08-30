@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ARPack RAG Tester</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0f172a; --panel:#111827; --muted:#1f2937; --fg:#e5e7eb; --accent:#60a5fa; --green:#34d399; --red:#f87171; }
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    .container{max-width:1100px;margin:0 auto;padding:24px}
+    h1{font-size:22px;margin:0 0 12px}
+    .panel{background:var(--panel);border:1px solid #1f2937;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 1px 8px rgba(0,0,0,.2)}
+    .row{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+    .col-4{grid-column:span 4} .col-6{grid-column:span 6} .col-12{grid-column:span 12}
+    label{font-size:12px;opacity:.9;display:block;margin:0 0 6px}
+    input,select,textarea,button{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #374151;background:#0b1220;color:var(--fg)}
+    textarea{min-height:160px}
+    button{cursor:pointer;background:#0b2549;border-color:#1e3a8a}
+    button:hover{background:#0c2d5a}
+    .btn-row{display:flex;flex-wrap:wrap;gap:8px}
+    .btn{width:auto}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:#0d223f;border:1px solid #1e3a8a;font-size:11px;margin-right:6px}
+    .muted{color:#9ca3af} .ok{color:var(--green)} .err{color:var(--red)}
+    .card{border:1px solid #1f2937;border-radius:12px;padding:12px;background:#0b1220}
+    .list{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:10px;max-height:400px;overflow:auto}
+    a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+    .tiny{font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>ARPack RAG Tester (no-build UI)</h1>
+
+    <div class="panel">
+      <div class="row">
+        <div class="col-6">
+          <label>API Base URL</label>
+          <input id="baseUrl" value="http://127.0.0.1:8000" />
+          <div class="tiny muted">Change if your FastAPI runs elsewhere.</div>
+        </div>
+        <div class="col-6">
+          <label>Query</label>
+          <input id="q" value="can agents do penetration testing?" />
+        </div>
+
+        <div class="col-4">
+          <label>k (papers)</label>
+          <input id="k" type="number" min="1" max="50" value="8" />
+        </div>
+        <div class="col-4">
+          <label>k_per_paper (chunks)</label>
+          <input id="kPerPaper" type="number" min="1" max="10" value="2" />
+        </div>
+        <div class="col-4">
+          <label>style</label>
+          <select id="style">
+            <option value="concise">concise</option>
+            <option value="detailed" selected>detailed</option>
+          </select>
+        </div>
+
+        <div class="col-4">
+          <label>include_context</label>
+          <select id="includeContext">
+            <option value="true" selected>true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+        <div class="col-4">
+          <label>self_consistency_n</label>
+          <input id="selfN" type="number" min="1" max="7" value="5" />
+        </div>
+        <div class="col-4">
+          <label>min_sources</label>
+          <input id="minSources" type="number" min="1" max="5" value="2" />
+        </div>
+      </div>
+
+      <div class="btn-row" style="margin-top:12px;">
+        <button class="btn" id="btnHealth">/healthz</button>
+        <button class="btn" id="btnSearch">/search</button>
+        <button class="btn" id="btnAsk">/ask</button>
+        <button class="btn" id="btnAskPro">/ask_pro</button>
+      </div>
+
+      <div id="status" class="tiny muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div id="healthWrap" class="panel" style="display:none;">
+      <div class="row"><div class="col-12"><strong>Health</strong></div></div>
+      <pre id="healthJson"></pre>
+    </div>
+
+    <div id="answerAsk" class="panel" style="display:none;">
+      <div class="row"><div class="col-12"><strong>Answer (/ask)</strong></div></div>
+      <pre id="askAnswer"></pre>
+      <div class="row">
+        <div class="col-12"><strong>Sources</strong></div>
+        <div id="askSources" class="col-12 list"></div>
+      </div>
+      <div class="row">
+        <div class="col-12"><strong>Snippets</strong></div>
+        <div id="askSnippets" class="col-12 list"></div>
+      </div>
+      <div id="askCtxWrap" style="margin-top:10px;">
+        <div><strong>Context Blocks (&lt;ctx&gt;)</strong></div>
+        <pre id="askCtx"></pre>
+      </div>
+      <div style="margin-top:10px;">
+        <div><strong>Raw JSON</strong></div>
+        <pre id="askJson"></pre>
+      </div>
+    </div>
+
+    <div id="answerAskPro" class="panel" style="display:none;">
+      <div class="row"><div class="col-12"><strong>Answer (/ask_pro)</strong></div></div>
+      <pre id="askProAnswer"></pre>
+      <div class="tiny" id="askProCitations"></div>
+      <div class="row">
+        <div class="col-12"><strong>Sources</strong></div>
+        <div id="askProSources" class="col-12 list"></div>
+      </div>
+      <div class="row">
+        <div class="col-12"><strong>Quotes</strong></div>
+        <div id="askProQuotes" class="col-12 list"></div>
+      </div>
+      <div class="row">
+        <div class="col-12"><strong>Snippets</strong></div>
+        <div id="askProSnippets" class="col-12 list"></div>
+      </div>
+      <div id="askProGK" style="margin-top:10px;"></div>
+      <div id="askProCtxWrap" style="margin-top:10px;">
+        <div><strong>Context Blocks (&lt;ctx&gt;)</strong></div>
+        <pre id="askProCtx"></pre>
+      </div>
+      <div style="margin-top:10px;">
+        <div><strong>Raw JSON</strong></div>
+        <pre id="askProJson"></pre>
+      </div>
+    </div>
+
+    <div id="searchWrap" class="panel" style="display:none;">
+      <div class="row"><div class="col-12"><strong>Search Results</strong></div></div>
+      <div id="searchList" class="list"></div>
+      <div style="margin-top:10px;">
+        <div><strong>Raw JSON</strong></div>
+        <pre id="searchJson"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const status = (msg, cls="muted") => { const el = $("status"); el.className = "tiny " + cls; el.textContent = msg; };
+
+    async function fetchJSON(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.status + " " + res.statusText + ": " + (await res.text()));
+      return res.json();
+    }
+
+    function renderSources(container, sources) {
+      container.innerHTML = "";
+      (sources || []).forEach(s => {
+        const div = document.createElement("div");
+        div.className = "card";
+        div.innerHTML = `
+          <div class="tiny muted">${s.paper_id} <span class="badge">score ${Number(s.score).toFixed(3)}</span></div>
+          <div style="margin:4px 0 6px"><strong>${s.title || ""}</strong></div>
+          <div class="tiny"><a href="${s.url}" target="_blank">abs</a> · <a href="${s.pdf}" target="_blank">pdf</a></div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function renderSnippets(container, snippets) {
+      container.innerHTML = "";
+      (snippets || []).forEach(sn => {
+        const div = document.createElement("div");
+        div.className = "card";
+        div.innerHTML = `
+          <div class="tiny muted">${sn.paper_id} · ${sn.chunk_id}</div>
+          <div class="tiny">${(sn.snippet || "").replace(/</g,"&lt;")}</div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function renderQuotes(container, quotes) {
+      container.innerHTML = "";
+      (quotes || []).forEach(q => {
+        const div = document.createElement("div");
+        div.className = "card";
+        div.innerHTML = `
+          <div class="tiny muted">${q.paper_id} · ${q.chunk_id}</div>
+          <div class="tiny">“${(q.text || "").replace(/</g,"&lt;")}”</div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    // Buttons
+    $("btnHealth").onclick = async () => {
+      try {
+        status("Checking health…");
+        const data = await fetchJSON(`${$("baseUrl").value}/healthz`);
+        $("healthWrap").style.display = "block";
+        $("healthJson").textContent = JSON.stringify(data, null, 2);
+        status("OK", "ok");
+      } catch (e) {
+        status(e.message, "err");
+      }
+    };
+
+    $("btnSearch").onclick = async () => {
+      try {
+        status("Running /search…");
+        const url = `${$("baseUrl").value}/search?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}`;
+        const data = await fetchJSON(url);
+        $("searchWrap").style.display = "block";
+        $("searchJson").textContent = JSON.stringify(data, null, 2);
+        renderSources($("searchList"), (data.results || []).map(r => ({
+          paper_id: r.paper_id || r.id, title: r.title, score: r.score, url: r.url, pdf: r.pdf
+        })));
+        status("OK", "ok");
+      } catch (e) {
+        status(e.message, "err");
+      }
+    };
+
+    $("btnAsk").onclick = async () => {
+      try {
+        status("Running /ask…");
+        const url = `${$("baseUrl").value}/ask?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}&k_per_paper=${Number($("kPerPaper").value)}&style=${$("style").value}&include_context=${$("includeContext").value}`;
+        const data = await fetchJSON(url);
+        $("answerAsk").style.display = "block";
+        $("askAnswer").textContent = data.answer || "";
+        renderSources($("askSources"), data.sources || []);
+        renderSnippets($("askSnippets"), data.snippets || []);
+        $("askCtxWrap").style.display = data.context_blocks ? "block" : "none";
+        $("askCtx").textContent = (data.context_blocks || []).join("\n\n---\n\n");
+        $("askJson").textContent = JSON.stringify(data, null, 2);
+        status("OK", "ok");
+      } catch (e) {
+        status(e.message, "err");
+      }
+    };
+
+    $("btnAskPro").onclick = async () => {
+      try {
+        status("Running /ask_pro…");
+        const url = `${$("baseUrl").value}/ask_pro?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}&k_per_paper=${Number($("kPerPaper").value)}&style=${$("style").value}&include_context=${$("includeContext").value}&self_consistency_n=${Number($("selfN").value)}&min_sources=${Number($("minSources").value)}`;
+        const data = await fetchJSON(url);
+        $("answerAskPro").style.display = "block";
+        $("askProAnswer").textContent = data.answer || "";
+        $("askProCitations").innerHTML = (data.citations || []).map(c => `<span class="badge">[${c}]</span>`).join(" ");
+        renderSources($("askProSources"), data.sources || []);
+        renderQuotes($("askProQuotes"), data.quotes || []);
+        renderSnippets($("askProSnippets"), data.snippets || []);
+        if (data.gk && (data.gk.subquestions?.length || data.gk.terms?.length)) {
+          $("askProGK").innerHTML = `<div><strong>Generated-Knowledge</strong></div>
+            <div class="tiny" style="margin-top:6px;"><strong>Sub-questions:</strong> ${(data.gk.subquestions||[]).map(s=>`<span class="badge">${s}</span>`).join(" ")}</div>
+            <div class="tiny" style="margin-top:6px;"><strong>Terms:</strong> ${(data.gk.terms||[]).map(s=>`<span class="badge">${s}</span>`).join(" ")}</div>`;
+        } else {
+          $("askProGK").innerHTML = "";
+        }
+        $("askProCtxWrap").style.display = data.context_blocks ? "block" : "none";
+        $("askProCtx").textContent = (data.context_blocks || []).join("\n\n---\n\n");
+        $("askProJson").textContent = JSON.stringify(data, null, 2);
+        status("OK", "ok");
+      } catch (e) {
+        status(e.message, "err");
+      }
+    };
+  </script>
+</body>
+</html>
