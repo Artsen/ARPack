@@ -1,0 +1,7 @@
+ARPack – arXiv RAG Toolkit
+Copyright (c) 2025 John Crafts
+
+This project uses third-party libraries and services subject to their own licenses
+(e.g., FastAPI, FAISS, sentence-transformers, arxiv). Usage of external APIs and
+content (e.g., OpenAI API, arXiv PDFs) remains subject to their respective terms.
+This project is not affiliated with or endorsed by arXiv®.
