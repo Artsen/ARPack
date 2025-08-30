@@ -6,6 +6,10 @@ A compact, portfolio-ready pipeline that fetches recent arXiv papers, **hydrates
 
 ---
 
+![ARPack UI](./screenshot.jpg)
+
+---
+
 ## ✨ What’s inside
 
 * **Ingestion**: pulls arXiv metadata (official client; no scraping).
