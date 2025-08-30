@@ -6,7 +6,7 @@ A compact, portfolio-ready pipeline that fetches recent arXiv papers, **hydrates
 
 ---
 
-![ARPack UI](./screenshot.jpg)
+[![ARPack UI](./screenshot.webp)](http://127.0.0.1:8000/ui)
 
 ---
 
