@@ -1,0 +1,12 @@
+arxiv
+fastapi
+uvicorn[standard]
+pydantic
+faiss-cpu
+numpy
+python-dotenv
+tqdm
+orjson
+openai>=1.0.0
+# Optional local embedding fallback (comment out if you prefer OpenAI only)
+sentence-transformers
