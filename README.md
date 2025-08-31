@@ -12,7 +12,7 @@ A compact, portfolio-ready pipeline that fetches recent arXiv papers, **hydrates
 
 ## ✨ What’s inside
 
-* **Ingestion**: pulls arXiv metadata (official client; no scraping).
+* **Ingestion**: pulls arXiv metadata using the arXiv API. The ingest pipeline queries the arXiv ATOM API (HTTP) and prefers `feedparser` for parsing; it falls back to the official `arxiv` client when needed. The ingest code always queries starting at `start=0`, does not include an `id_list` parameter, and uses the exact `--limit` value as the `max_results` parameter sent to arXiv.
 * **Hydration & Chunking**: resolves PDFs/abs pages, cleans text, splits into chunks with paper and chunk IDs.
 * **Summarization**: LLM produces a structured record (problem, method, results, limitations, etc.) for each paper.
 * **Embeddings**: OpenAI by default; optional local fallback (`sentence-transformers`) — batched for speed.
@@ -37,9 +37,14 @@ data/
   chunks.jsonl            # hydrated + chunked text
   index.faiss             # FAISS vector index
   index.faiss.meta.json   # sidecar metadata (ids + paper/chunk meta)
+  pdfs/                   # downloaded PDFs (hydration step places files here)
 scripts/
   build_index.py          # builds FAISS from papers.jsonl or chunks.jsonl
   hydrate_and_chunk.py    # expands papers -> full text chunks
+  check_imports.py        # small dev helper to validate imports
+  debug_pdf_worker.py     # PDF worker timeout/debug helper
+  pdf_worker_subproc.py   # subprocess PDF extraction helper for Windows
+  preview_papers.py       # preview helper for paper JSONL
 src/
   ingest.py               # fetch + summarize arXiv -> papers.jsonl
   embed.py                # embedding provider(s)
@@ -57,13 +62,17 @@ ui_static/
 * **Windows 11 / macOS / Linux** supported
 * OpenAI API key (if using OpenAI embeddings/summarization)
 
+Note: The ingest pipeline prefers `feedparser` to parse arXiv's ATOM feed. `feedparser` has been added to `requirements.txt`.
+
 ---
 
-## 🚀 Quickstart
+## 🚀 Quickstart (updated)
+
+These steps get you from an empty repo to a running API and FAISS index.
 
 ### 1) Create venv & install
 
-**Windows (PowerShell):**
+Windows (PowerShell):
 
 ```powershell
 python -m venv .venv
@@ -71,7 +80,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-**macOS/Linux:**
+macOS / Linux:
 
 ```bash
 python -m venv .venv
@@ -79,73 +88,143 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2) Configure environment
+Notes on system/optional deps:
 
-Copy and edit:
+* `faiss-cpu` can be tricky on Windows via pip. If `pip install -r requirements.txt` fails for faiss, use conda:
 
-```bash
-cp .env.example .env
+```powershell
+conda install -c pytorch faiss-cpu
 ```
 
-Required/Useful keys:
+* Optional but recommended for better chunking and sanitization:
+  * `tiktoken` — token-aware chunking (deterministic token spans)
+  * `beautifulsoup4` (`bs4`) — HTML cleaning
+  * `pandoc` (external) — high-quality ar5iv HTML -> plain text conversion; set `ARP_PANDOC_PATH` if not on PATH
+  * `PyMuPDF` (`fitz`) and/or `pdfminer.six` — PDF extraction tools
+  * `sentence-transformers` — optional local embedding fallback
 
-| Key                        | What                                        | Example  |
-| -------------------------- | ------------------------------------------- | -------- |
-| `OPENAI_API_KEY`           | For LLM summarization + embeddings (OpenAI) | `sk-...` |
-| `EMBEDDING_PROVIDER`       | `openai` or `local`                         | `openai` |
-| `ARP_MIN_DISTINCT_SOURCES` | Default min sources for `/ask_pro`          | `2`      |
-| `ARP_SELF_CONSISTENCY_N`   | Default vote count for `/ask_pro`           | `5`      |
+Install extras if needed:
 
-> **Windows note:** if an old API key is “stuck”, your system/user environment variables may override `.env`. You can verify what your app sees with:
->
-> ```powershell
-> python -c "import os; from dotenv import load_dotenv; load_dotenv(); print((os.getenv('OPENAI_API_KEY') or '')[:10])"
-> ```
->
-> If it shows the wrong prefix, update/remove the Windows env var and reopen your shell.
+```powershell
+pip install tiktoken beautifulsoup4 sentence-transformers pymupdf pdfminer.six
+# and install pandoc via its installer or your package manager
+```
+
+### 2) Configure environment (private)
+
+Copy the example and edit values locally. Keep the real `.env` private — do not commit it.
+
+Windows (PowerShell):
+
+```powershell
+copy .env.example .env
+notepad .env
+```
+
+Verify the running process sees your `.env` (this loads it into process env):
+
+```powershell
+python -c "import os; from dotenv import load_dotenv; load_dotenv(); print((os.getenv('OPENAI_API_KEY') or '')[:10])"
+```
+
+Key env vars (see `.env.example`):
+
+| Env | Purpose / default |
+|-----|-------------------|
+| `OPENAI_API_KEY` | OpenAI auth (if using OpenAI; leave empty for local-only runs) |
+| `EMBEDDING_PROVIDER` | `openai` or `local` (default: `openai`) |
+| `ARP_MIN_DISTINCT_SOURCES` | Min distinct sources for `/ask_pro` (default: `2`) |
+| `ARP_SELF_CONSISTENCY_N` | Self-consistency candidate count (default: `5`) |
+| `ARP_INDEX` | Path to FAISS index (default: `data/index.faiss`) |
+| `ARP_META` | Sidecar metadata path (default: ARP_INDEX + `.meta.json`) |
+| `ARP_CHUNKS` | Path to chunks JSONL used by API (default: `data/chunks.jsonl`) |
+| `ARP_CHUNKS_PER_PAPER` | Chunks per paper returned (default: `2`) |
+| `ARP_MAX_CTX_CHARS` | Max assembled context chars (default: `12000`) |
+| `ARP_GK_ENABLED` | Enable generated-knowledge expansions (default: `true`) |
+| `ARP_PANDOC_PATH` | Optional path to `pandoc` executable if not on PATH |
+
+IMPORTANT: `.env.example` should be committed. Keep `.env` local and secret. The repo `.gitignore` now excludes `.env`.
 
 ### 3) Ingest papers (summaries)
 
-Pick a category and limit:
+Fetch metadata + structured LLM summaries into `data/papers.jsonl`:
 
 ```powershell
-# Windows
-python -m src.ingest --cat cs.AI --limit 50
+python -m src.ingest --cat cs.AI --limit 50 --out data/papers.jsonl
 ```
 
-This writes `data/papers.jsonl`.
+Notes:
+* The summarization step will call the LLM if `OPENAI_API_KEY` is set; otherwise it writes heuristic fallbacks.
+* The ingestion writes richly structured JSONL records (see `src/schema.py`).
+* The `--limit` flag is used directly as the `max_results` parameter in the arXiv query (i.e., the exact number you request is what the code asks the API for). The ingest code always queries starting at `start=0` and does not send an `id_list` parameter.
+* If you request a large `--limit` you may hit transient arXiv rate/response issues (empty page). If you see `UnexpectedEmptyPageError` or an empty result set for larger limits, try a smaller limit (e.g., 10-50) or re-run after a short delay. If you'd like, the ingest code can be extended to automatically page with smaller per-request sizes and aggregate results; I can add that for you.
 
 ### 4) Hydrate + chunk full texts (for deeper RAG)
 
+Hydrate PDFs, extract per-page text, and chunk. Recommended to run on a small batch first.
+
 ```powershell
-python .\scripts\hydrate_and_chunk.py .\data\papers.jsonl .\data\chunks.jsonl
+python .\scripts\hydrate_and_chunk.py .\data\papers.jsonl .\data\chunks.jsonl --max-papers 5 --embed-now
 ```
 
-### 5) Build FAISS (from **chunks** or **papers**)
+Options of note:
+* `--max-papers N` — process only the first N papers (useful for smoke tests)
+* `--embed-now` — compute embeddings at chunk time and embed fields into each chunk record (speeds `build_index.py`)
+* `ARP_PANDOC_PATH` controls pandoc usage for ar5iv HTML -> plaintext sanitization (optional but recommended for clean text)
 
-* **Chunk index (recommended for Q\&A quality):**
+After running, quickly verify the output is non-empty and contains expected fields:
+
+PowerShell checks:
+
+```powershell
+Get-Content .\data\chunks.jsonl -TotalCount 5
+(Get-Content .\data\chunks.jsonl | Measure-Object -Line).Lines
+python -c "import json; print(list(json.loads(open('data/chunks.jsonl').read().splitlines()[0]).keys()))"
+```
+
+### 5) Build FAISS (chunk-level recommended)
+
+Prefer indexing `data/chunks.jsonl` for passage-level retrieval. If you intentionally want coarse retrieval, use `data/papers.jsonl`.
+
+Chunk index (recommended):
 
 ```powershell
 python .\scripts\build_index.py .\data\chunks.jsonl .\data\index.faiss
 ```
 
-* **Abstract/summary index (faster, coarser):**
+Paper-level index (coarser):
 
 ```powershell
 python .\scripts\build_index.py .\data\papers.jsonl .\data\index.faiss
 ```
 
+Notes:
+* The indexer prefers precomputed embeddings present on chunk records (key `embedding` or `embeddings.*`) and only embeds missing rows.
+* Typical embedding dimension (OpenAI text-embedding-3-small) is 1536; the indexer will normalize vectors before building FAISS.
+
 ### 6) Run the API
+
+Start the FastAPI server (reload useful during development):
 
 ```powershell
 uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+If `OPENAI_API_KEY` is not set the API will still run, but LLM-powered endpoints will return evidence-only fallbacks.
 
 Open the UI:
 
 ```
 http://127.0.0.1:8000/ui
 ```
+
+### Developer helpers (what's in `scripts/`)
+
+* `scripts/pdf_worker_subproc.py` — subprocess-based PDF extractor (used by `hydrate_and_chunk.py`); keep this for robust extraction on Windows.
+* `scripts/debug_pdf_worker.py` — small multiprocessing timeout tester for PDF extraction (dev helper).
+* `scripts/preview_papers.py` — convenience CLI to print compact previews of `data/papers.jsonl` for QA.
+
+If you want me to remove optional dev helpers (e.g., `debug_pdf_worker.py`), tell me and I'll delete them and commit the change.
 
 ---
 
@@ -232,12 +311,21 @@ Each `/ask_pro` response also returns the **audit trail** (queries, GK, quotes, 
 
 ## 🔧 Configuration
 
-| Env                        | Purpose                             |
+The project reads several environment variables. Keep secrets in a local `.env` file (do not commit).
+
+| Env                        | Purpose / default                   |
 | -------------------------- | ----------------------------------- |
 | `OPENAI_API_KEY`           | OpenAI auth (if using OpenAI)       |
-| `EMBEDDING_PROVIDER`       | `openai` or `local`                 |
-| `ARP_MIN_DISTINCT_SOURCES` | Default min citations in `/ask_pro` |
-| `ARP_SELF_CONSISTENCY_N`   | Default candidate count for voting  |
+| `EMBEDDING_PROVIDER`       | `openai` or `local` (default: `openai`) |
+| `ARP_MIN_DISTINCT_SOURCES` | Default min citations in `/ask_pro` (default: `2`) |
+| `ARP_SELF_CONSISTENCY_N`   | Default candidate count for voting (default: `5`) |
+| `ARP_INDEX`                | Path to FAISS index used by API (default: `data/index.faiss`) |
+| `ARP_META`                 | Sidecar metadata path (default: ARP_INDEX + `.meta.json`) |
+| `ARP_CHUNKS`               | Path to chunks JSONL used by API (default: `data/chunks.jsonl`) |
+| `ARP_CHUNKS_PER_PAPER`     | Default chunks per paper returned (default: `2`) |
+| `ARP_MAX_CTX_CHARS`        | Max context chars assembled for answers (default: `12000`) |
+| `ARP_GK_ENABLED`           | Enable generated-knowledge in `/ask_pro` (`true`/`false`, default: `true`) |
+| `ARP_PANDOC_PATH`          | Optional path to `pandoc` executable if not on PATH |
 
 **Embedding model defaults** (see `src/embed.py`):
 

@@ -1,5 +1,10 @@
 from __future__ import annotations
 import sys, json, os
+
+# Ensure repo root on sys.path so `src` imports work when run as a script
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 import numpy as np
 import faiss
 
@@ -36,48 +41,103 @@ def main():
         print("Input is empty.")
         sys.exit(2)
 
-    is_chunks = ("text" in first) and ("chunk_id" in first)
     ids, metas = [], []
+    rows = [first] + list(g)
 
-    if is_chunks:
-        # INDEX OVER CHUNKS (embed fresh)
-        rows = [first] + list(g)
-        texts = [r["text"] for r in rows]
-        mat = _embed_texts_batched(texts, batch_size=128)  # (N, D)
+    # Detect whether rows are chunk records (have "text" and "chunk_id")
+    has_chunks = all(isinstance(r, dict) and "text" in r and "chunk_id" in r for r in rows)
 
-        # Build metadata arrays in the same order
-        for r in rows:
-            ids.append(r["chunk_id"])
-            metas.append({
-                "chunk_id":  r["chunk_id"],
-                "paper_id":  r["paper_id"],
-                "title":     r["title"],
-                "authors":   r["authors"],
-                "categories":r["categories"],
-                "published": r["published"],
-            })
+    if has_chunks:
+        # Prefer precomputed embeddings on a per-row basis. For rows without
+        # precomputed vectors, compute embeddings in batches.
+        pre_vecs = []
+        to_embed_texts = []
+        to_embed_indices = []
+        for i, r in enumerate(rows):
+            emb = None
+            # Accept embeddings stored under 'embedding' or 'embeddings' keys
+            if isinstance(r.get("embedding"), list):
+                emb = np.array(r["embedding"], dtype="float32")
+            else:
+                # some workflows store embeddings under embeddings.abstract or embeddings.text
+                eobj = r.get("embeddings") or {}
+                if isinstance(eobj, dict):
+                    # try common keys
+                    for k in ("text", "abstract", "summary_short"):
+                        if isinstance(eobj.get(k), list):
+                            emb = np.array(eobj[k], dtype="float32")
+                            break
+            if emb is not None:
+                pre_vecs.append(emb)
+                ids.append(r["chunk_id"])
+                metas.append({
+                    "chunk_id": r["chunk_id"],
+                    "paper_id": r.get("paper_id"),
+                    "title":    r.get("title"),
+                })
+            else:
+                to_embed_texts.append(r.get("text", ""))
+                to_embed_indices.append(i)
+
+        # Embed missing texts if any
+        if to_embed_texts:
+            mat_new = _embed_texts_batched(to_embed_texts, batch_size=128)
+            # interleave new embeddings into ids/metas in original order
+            ni = 0
+            for idx in to_embed_indices:
+                r = rows[idx]
+                vec = mat_new[ni]
+                pre_vecs.append(vec)
+                ids.append(r["chunk_id"])
+                metas.append({
+                    "chunk_id": r["chunk_id"],
+                    "paper_id": r.get("paper_id"),
+                    "title":    r.get("title"),
+                })
+                ni += 1
+
+        if not pre_vecs:
+            print("No vectors found for chunk rows.")
+            sys.exit(2)
+
+        mat = np.vstack(pre_vecs)
 
     else:
-        # INDEX OVER PAPERS (use stored embeddings)
+        # Treat rows as paper-level metadata; prefer stored embeddings under
+        # row.embeddings.abstract or row.embeddings.summary_short. If missing,
+        # we try to embed title+abstract as fallback.
         vecs = []
-        rows = [first] + list(g)
-        for row in rows:
-            emb = row.get("embeddings", {}).get("abstract") or row.get("embeddings", {}).get("summary_short")
-            if emb is None:
-                continue
-            vecs.append(np.array(emb, dtype="float32"))
-            ids.append(row["id"])
-            metas.append({
-                "id":         row["id"],
-                "title":      row["title"],
-                "authors":    row["authors"],
-                "categories": row["categories"],
-                "published":  row["published"],
-            })
-        if not vecs:
-            print("No vectors found.")
-            sys.exit(2)
-        mat = np.vstack(vecs)
+        for r in rows:
+            emb = None
+            eobj = r.get("embeddings") or {}
+            if isinstance(eobj, dict):
+                for k in ("abstract", "summary_short", "title"):
+                    if isinstance(eobj.get(k), list):
+                        emb = np.array(eobj[k], dtype="float32")
+                        break
+            if emb is not None:
+                vecs.append(emb)
+                ids.append(r.get("id"))
+                metas.append({
+                    "id": r.get("id"),
+                    "title": r.get("title"),
+                })
+            else:
+                # fallback: assemble a short text for embedding
+                txt = " ".join([str(r.get("title", "")), str(r.get("summary_raw", ""))])
+                vecs.append(txt)
+                ids.append(r.get("id"))
+                metas.append({"id": r.get("id"), "title": r.get("title")})
+
+        # If any item in vecs is a string, we need to embed the batch
+        if any(isinstance(v, str) for v in vecs):
+            texts = [v if isinstance(v, str) else "" for v in vecs]
+            mat = _embed_texts_batched(texts, batch_size=128)
+        else:
+            if not vecs:
+                print("No vectors found.")
+                sys.exit(2)
+            mat = np.vstack(vecs)
 
     # Cosine similarity via normalized vectors + inner-product index
     faiss.normalize_L2(mat)

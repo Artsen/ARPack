@@ -1,12 +1,32 @@
+# Core/runtime
 arxiv
 fastapi
 uvicorn[standard]
 pydantic
-faiss-cpu
 numpy
 python-dotenv
 tqdm
 orjson
+requests
+feedparser
+
+# Vector DB / embeddings
+faiss-cpu             # system-specific; prefer conda on Windows if pip fails
 openai>=1.0.0
+
+# PDF / HTML extraction & sanitization (used by scripts/hydrate_and_chunk.py)
+PyMuPDF               # provides `fitz` module (fast PDF parsing)
+pdfminer.six          # fallback PDF extraction
+beautifulsoup4        # HTML cleaning
+lxml                  # faster parser for BeautifulSoup
+pandoc                # external binary; not a pip package — installer available separately
+
+# Tokenization / chunking
+tiktoken             # optional but recommended for deterministic token spans
+
 # Optional local embedding fallback (comment out if you prefer OpenAI only)
 sentence-transformers
+
+# Misc / tooling
+mcp
+# end
