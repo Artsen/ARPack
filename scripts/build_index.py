@@ -70,10 +70,30 @@ def main():
             if emb is not None:
                 pre_vecs.append(emb)
                 ids.append(r["chunk_id"])
+                # richer, but compact, chunk-level metadata for filtering/rerank/UI
                 metas.append({
                     "chunk_id": r["chunk_id"],
                     "paper_id": r.get("paper_id"),
-                    "title":    r.get("title"),
+                    "entry_id": r.get("entry_id") or (r.get("links") or {}).get("entry"),
+                    "source": r.get("source") or "arxiv",
+                    "title": r.get("title"),
+                    "authors_short": (lambda a: (", ".join(a[:3]) + (" et al." if len(a) > 3 else "")) if isinstance(a, list) else None)(r.get("authors")),
+                    "snippet": r.get("snippet") or (r.get("text")[:300] if isinstance(r.get("text"), str) else None),
+                    "page_range": r.get("page_range"),
+                    "token_count": r.get("token_count"),
+                    "chunk_pos": r.get("chunk_pos"),
+                    "categories": r.get("categories"),
+                    "published": r.get("published"),
+                    "year": (lambda t: int(t[:4]) if isinstance(t, str) and len(t) >= 4 else None)(r.get("published")),
+                    "doi": r.get("doi"),
+                    "journal_ref": r.get("journal_ref"),
+                    "links": r.get("links") or {},
+                    "key_terms": r.get("key_terms"),
+                    "novelty_score": r.get("novelty_score"),
+                    "has_code": bool(r.get("code_repos")),
+                    "has_data": bool(r.get("datasets")),
+                    "idx_version": os.getenv("ARP_IDX_VERSION", "v1"),
+                    "embed_model": os.getenv("ARP_EMBED_MODEL", r.get("embed_model") or os.getenv("EMBEDDING_MODEL") or os.getenv("EMBEDDING_PROVIDER")),
                 })
             else:
                 to_embed_texts.append(r.get("text", ""))
@@ -100,6 +120,11 @@ def main():
             print("No vectors found for chunk rows.")
             sys.exit(2)
 
+        # Validate embedding dimensions: all precomputed vectors and newly computed ones must agree
+        dims = [int(p.shape[0]) for p in pre_vecs]
+        if len(set(dims)) != 1:
+            print(f"Inconsistent embedding dimensions found in input chunk rows: {sorted(set(dims))}")
+            sys.exit(2)
         mat = np.vstack(pre_vecs)
 
     else:
@@ -137,6 +162,11 @@ def main():
             if not vecs:
                 print("No vectors found.")
                 sys.exit(2)
+            # validate precomputed vectors share the same dim
+            dims = [int(v.shape[0]) for v in vecs]
+            if len(set(dims)) != 1:
+                print(f"Inconsistent embedding dimensions in paper rows: {sorted(set(dims))}")
+                sys.exit(2)
             mat = np.vstack(vecs)
 
     # Cosine similarity via normalized vectors + inner-product index
@@ -145,8 +175,10 @@ def main():
     index.add(mat)
 
     faiss.write_index(index, out_path)
+    # add embedding model/dimension metadata to sidecar to help detect mismatches later
+    side = {"ids": ids, "meta": metas, "embedding_dim": int(mat.shape[1]), "embed_model": os.getenv("ARP_EMBED_MODEL") or os.getenv("EMBEDDING_MODEL") or os.getenv("EMBEDDING_PROVIDER")}
     with open(out_path + ".meta.json", "w", encoding="utf-8") as f:
-        json.dump({"ids": ids, "meta": metas}, f, ensure_ascii=False, indent=2)
+        json.dump(side, f, ensure_ascii=False, indent=2)
 
     print(f"Wrote index: {out_path} and {out_path}.meta.json (N={len(ids)}, D={mat.shape[1]})")
 

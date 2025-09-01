@@ -30,3 +30,6 @@ sentence-transformers
 # Misc / tooling
 mcp
 # end
+
+# Optional sparse retrieval helper (enables BM25 blending in two-stage retriever)
+rank_bm25

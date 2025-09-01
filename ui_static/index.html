@@ -32,28 +32,63 @@
   <div class="container">
     <h1>ARPack RAG Tester (no-build UI)</h1>
 
+    <div class="panel" id="aboutPanel">
+      <div style="font-weight:600;margin-bottom:6px">About this experiment — ARPack RAG Tester</div>
+      <div class="tiny muted">
+        <p>This page is a compact, no-build demonstration of a retrieval-augmented generation (RAG) workflow built around a small indexed corpus of academic papers. It is intended as a lab/portfolio piece: you can poke the API endpoints, inspect raw JSON, and observe how retrieved documents and short text snippets are combined into a final answer. The UI is deliberately simple so the focus stays on the data flow, reproducibility, and observable outputs you can cite in a write-up.</p>
+
+  <p>High-level flow: when you submit a query the client first retrieves relevant papers and content chunks from a vector index (the "retriever"). You can choose the search method (plain `/search` or the more advanced `two_stage_search`) and toggle a lexical <em>rerank</em> step — rerank is a parameter to the search, not the LLM. The client can then forward the exact retrieved candidate set (paper ids) into the LLM-enabled `/ask_pro` endpoint so the model only synthesizes from that constrained evidence set. Each button below maps directly to a server endpoint — pressing it runs the call, shows the raw JSON returned by the server, and renders human-friendly cards for sources/snippets/quotes.</p>
+
+        <p>Buttons and what they do:
+        <ul>
+          <li><strong>/healthz</strong> — probes server health and reports which subsystems are available (index, embedding service, LLM configuration). If the LLM is not configured the banner near the top will explain that /ask_pro and quote-selection are disabled.</li>
+          <li><strong>/search</strong> — a direct similarity search that returns matching papers and basic metadata. Use this to verify the index and embeddings without involving the LLM.</li>
+          <li><strong>/ask</strong> — runs a retrieval + lightweight aggregation pipeline that returns an answer assembled from retrieved context blocks. It emphasizes transparency: you get the answer text, the source list, snippet cards, and the raw JSON so you can trace provenance.</li>
+          <li><strong>/ask_pro</strong> — the LLM-enabled path. This endpoint forwards retrieved context to a configured language model to generate a synthesized answer, plus structured artifacts: citations, direct quotes sampled from the text, and optional generated-knowledge (subquestions and terms). The client can pass an explicit `paper_ids` list (derived from `two_stage_search`) so `/ask_pro` synthesizes only from the chosen candidates. The behavior depends on LLM configuration and the server's OPENAI_API_KEY.</li>
+          <li><strong>/two_stage_search</strong> — a coarse-to-fine retrieval strategy: it expands the candidate set (a wide recall pass) then reranks candidates using a combined paper/chunk scoring heuristic. The checkbox labeled "rerank (TF-IDF)" toggles an extra TF‑IDF or lexical reranker that refines ordering by surface text overlap.</li>
+        </ul>
+        </p>
+
+  <p>Parameters explained:
+        <ul>
+          <li><strong>k (papers)</strong> — maximum number of papers to return from the retriever. Higher values increase recall but also cost/time for downstream steps.</li>
+          <li><strong>k_per_paper (chunks)</strong> — number of context chunks to pull per paper; controls how much local context the synthesizer or reranker sees.</li>
+          <li><strong>style</strong> — simple LLM prompt styling toggle (for example, 'concise' vs 'detailed'); this modifies prompts sent to the model for /ask and /ask_pro.</li>
+          <li><strong>include_context</strong> — when true the UI exposes the context blocks used to generate the answer so you can inspect exactly what the model saw.</li>
+          <li><strong>paper_ids</strong> — optional (comma-separated). When set by the client the server will constrain retrieval to these paper ids; this is how `two_stage_search` results are forwarded into `/ask` and `/ask_pro` for deterministic evidence grounding.</li>
+          <li><strong>self_consistency_n</strong> — for /ask_pro only: how many independent samples the model should draw for the self-consistency voting strategy. Increasing it can improve robustness but costs more.</li>
+          <li><strong>min_sources</strong> — post-filter threshold used by the pro path to require consensus across multiple sources before confidently reporting a claim.</li>
+        </ul>
+        </p>
+
+        <p>What the result panels show: the UI mirrors the server's structured outputs so you can use this as evidence in a demo or report. "Sources" are paper-level cards showing ids, titles, scores and links to abstracts/PDFs. "Snippets" are the exact text spans pulled from the indexed chunks. "Quotes" (when present) are selected spans the pro pipeline highlights as directly supporting the generated claim. The "Raw JSON" panels are intentionally shown so you can capture exact payloads for reproducibility or further analysis.</p>
+
+        <p>Notes for reproducibility and experimentation: run /healthz first to confirm which components are live. Use /search to sanity-check the index and tune k/k_per_paper before using /ask or /ask_pro. When demonstrating this as a portfolio experiment, record the query, parameter values, and raw JSON snapshot — those three items are sufficient to reproduce the exact input the model received and the retrieval state that produced the answer.</p>
+      </div>
+    </div>
+
     <div class="panel">
       <div class="row">
         <div class="col-6">
-          <label>API Base URL</label>
+          <label for="baseUrl">API Base URL</label>
           <input id="baseUrl" value="http://127.0.0.1:8000" />
           <div class="tiny muted">Change if your FastAPI runs elsewhere.</div>
         </div>
         <div class="col-6">
-          <label>Query</label>
+          <label for="q">Query</label>
           <input id="q" value="can agents do penetration testing?" />
         </div>
 
         <div class="col-4">
-          <label>k (papers)</label>
+          <label for="k">k (papers)</label>
           <input id="k" type="number" min="1" max="50" value="8" />
         </div>
         <div class="col-4">
-          <label>k_per_paper (chunks)</label>
+          <label for="kPerPaper">k_per_paper (chunks)</label>
           <input id="kPerPaper" type="number" min="1" max="10" value="2" />
         </div>
         <div class="col-4">
-          <label>style</label>
+          <label for="style">style</label>
           <select id="style">
             <option value="concise">concise</option>
             <option value="detailed" selected>detailed</option>
@@ -61,30 +96,63 @@
         </div>
 
         <div class="col-4">
-          <label>include_context</label>
+          <label for="includeContext">include_context</label>
           <select id="includeContext">
             <option value="true" selected>true</option>
             <option value="false">false</option>
           </select>
         </div>
         <div class="col-4">
-          <label>self_consistency_n</label>
+          <label for="selfN">self_consistency_n</label>
           <input id="selfN" type="number" min="1" max="7" value="5" />
         </div>
         <div class="col-4">
-          <label>min_sources</label>
+          <label for="minSources">min_sources</label>
           <input id="minSources" type="number" min="1" max="5" value="2" />
         </div>
       </div>
 
-      <div class="btn-row" style="margin-top:12px;">
-        <button class="btn" id="btnHealth">/healthz</button>
-        <button class="btn" id="btnSearch">/search</button>
-        <button class="btn" id="btnAsk">/ask</button>
-        <button class="btn" id="btnAskPro">/ask_pro</button>
+      <div class="btn-row" style="margin-top:12px;gap:16px;align-items:center;">
+        <div style="display:flex;gap:12px;align-items:center;">
+          <label for="mainSearchMethod" class="tiny muted" style="margin:0">search method</label>
+          <select id="mainSearchMethod" style="min-width:160px">
+            <option value="search">search</option>
+            <option value="two_stage_search">two_stage_search</option>
+          </select>
+          <label style="display:flex;align-items:center;gap:8px;margin-left:8px"><input type="checkbox" id="chkRerank"/> <span class="tiny">rerank (TF-IDF)</span></label>
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn" id="btnAsk">ask</button>
+          <button class="btn" id="btnAskPro">pro_ask</button>
+          <button class="btn" id="btnHealth">healthz</button>
+        </div>
+      </div>
+
+      <!-- Debug / retriever-only controls -->
+      <div class="panel" id="debugPanel" style="margin-top:12px;">
+        <div style="font-weight:600;margin-bottom:6px">Debug — retriever-only</div>
+        <div class="row">
+          <div class="col-6">
+            <label class="tiny muted">Search method</label>
+            <div style="display:flex;gap:8px">
+              <button class="btn" id="dbgSearch">search</button>
+              <button class="btn" id="dbgTwoStage">two_stage_search</button>
+            </div>
+          </div>
+          <div class="col-6">
+            <label class="tiny muted">Search extra</label>
+            <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="dbgRerank"/> <span class="tiny">rerank (TF-IDF)</span></label>
+          </div>
+        </div>
       </div>
 
       <div id="status" class="tiny muted" style="margin-top:8px;"></div>
+    </div>
+
+    <div id="llmBanner" class="panel" style="display:none;border-left:4px solid #f59e0b;">
+      <div style="font-weight:600;color:#f59e0b">LLM not configured</div>
+      <div class="tiny muted">OPENAI_API_KEY is not set on the server. /ask_pro and quote-selection features will be disabled until you set the key and restart the server.</div>
     </div>
 
     <div id="healthWrap" class="panel" style="display:none;">
@@ -119,7 +187,8 @@
       <div class="tiny" id="askProCitations"></div>
       <div class="row">
         <div class="col-12"><strong>Sources</strong></div>
-        <div id="askProSources" class="col-12 list"></div>
+  <div id="askProCandidatesWrap" class="col-12" style="margin-bottom:8px;display:none;"></div>
+  <div id="askProSources" class="col-12 list"></div>
       </div>
       <div class="row">
         <div class="col-12"><strong>Quotes</strong></div>
@@ -142,7 +211,7 @@
 
     <div id="searchWrap" class="panel" style="display:none;">
       <div class="row"><div class="col-12"><strong>Search Results</strong></div></div>
-      <div id="searchList" class="list"></div>
+  <div id="searchList" class="list"></div>
       <div style="margin-top:10px;">
         <div><strong>Raw JSON</strong></div>
         <pre id="searchJson"></pre>
@@ -152,7 +221,28 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const status = (msg, cls="muted") => { const el = $("status"); el.className = "tiny " + cls; el.textContent = msg; };
+    const status = (msg, cls="muted") => { const el = $("status"); if (!el) return; el.className = "tiny " + cls; el.textContent = msg; };
+
+    // Global JS error capture: surface errors in-page so users can copy them from UI
+    (function installErrorPanel(){
+      const panel = document.createElement('div');
+      panel.id = 'jsErrorPanel';
+      panel.style.cssText = 'position:fixed;right:12px;bottom:12px;max-width:420px;z-index:9999;display:none;';
+      panel.innerHTML = `<div class="panel" style="background:#3f1f1f;border-left:4px solid #f87171;">
+        <div style="font-weight:600;color:#f87171">Client JS error</div>
+        <pre id="jsErrorPre" class="tiny" style="white-space:pre-wrap;max-height:220px;overflow:auto;margin-top:6px"></pre>
+      </div>`;
+      document.body.appendChild(panel);
+
+      window.addEventListener('error', (ev) => {
+        try { $("jsErrorPanel").style.display = 'block'; $("jsErrorPre").textContent = ev.message + '\n' + (ev.error && ev.error.stack ? ev.error.stack : ''); } catch(e){}
+        status('Client JS error (see panel)', 'err');
+      });
+      window.addEventListener('unhandledrejection', (ev) => {
+        try { $("jsErrorPanel").style.display = 'block'; $("jsErrorPre").textContent = String(ev.reason) + '\n' + (ev.reason && ev.reason.stack ? ev.reason.stack : ''); } catch(e){}
+        status('Client unhandled promise rejection (see panel)', 'err');
+      });
+    })();
 
     async function fetchJSON(url) {
       const res = await fetch(url);
@@ -170,6 +260,36 @@
           <div style="margin:4px 0 6px"><strong>${s.title || ""}</strong></div>
           <div class="tiny"><a href="${s.url}" target="_blank">abs</a> · <a href="${s.pdf}" target="_blank">pdf</a></div>
         `;
+        container.appendChild(div);
+      });
+    }
+
+    // Render search results deduped by paper_id, preserving first-seen order.
+    function renderSearchResults(container, rawResults) {
+      container.innerHTML = "";
+      const seen = new Set();
+      const agg = {};
+      (rawResults || []).forEach(r => {
+  const pid = (r.meta && r.meta.paper_id) ? r.meta.paper_id : (r.paper_id || r.id);
+        if (!pid) return;
+  if (!agg[pid]) agg[pid] = { paper_id: pid, title: (r.meta && r.meta.title) ? r.meta.title : (r.title || ""), score: (r.final_score !== undefined && r.final_score !== null) ? r.final_score : (r.score || 0), count: 0 };
+        agg[pid].count += 1;
+        // keep highest score
+  const curScore = (r.final_score !== undefined && r.final_score !== null) ? r.final_score : (r.score || 0);
+  if (curScore > agg[pid].score) agg[pid].score = curScore;
+      });
+      // preserve input order: iterate rawResults and emit first-seen
+      const ordered = [];
+      (rawResults || []).forEach(r => {
+        const pid = r.meta?.paper_id || r.paper_id || r.id;
+        if (!pid || seen.has(pid)) return;
+        seen.add(pid);
+        ordered.push(agg[pid]);
+      });
+      ordered.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'card';
+        div.innerHTML = `<div class="tiny muted">${s.paper_id} <span class="badge">score ${Number(s.score).toFixed(3)}</span> <span class="tiny muted">(${s.count} chunk${s.count>1?'s':''})</span></div><div style="margin:4px 0 6px"><strong>${s.title||''}</strong></div><div class="tiny"><a href="https://arxiv.org/abs/${s.paper_id}" target="_blank">abs</a> · <a href="https://arxiv.org/pdf/${s.paper_id}.pdf" target="_blank">pdf</a></div>`;
         container.appendChild(div);
       });
     }
@@ -200,6 +320,23 @@
       });
     }
 
+    // Helper: run selected search method (search or two_stage_search)
+    async function runSearchSelected({q, k, k_per_paper, rerank, top_m}){
+      // defensive: gracefully handle missing DOM elements (helps when debugging in alternate pages)
+      const baseEl = $("baseUrl");
+      const base = baseEl ? baseEl.value : 'http://127.0.0.1:8000';
+      const methodEl = $("mainSearchMethod");
+      const method = methodEl ? methodEl.value : 'search';
+      if (method === 'two_stage_search'){
+        const params = new URLSearchParams({ q, k: String(k), k_per_paper: String(k_per_paper), top_m: String(top_m || 75), paper_weight: '0.4', chunk_weight: '0.6', rerank: rerank ? 'true' : 'false' });
+        const url = `${base}/two_stage_search?${params.toString()}`;
+        return await fetchJSON(url);
+      } else {
+        const url = `${base}/search?q=${encodeURIComponent(q)}&k=${String(k)}${rerank ? '&rerank=true' : ''}`;
+        return await fetchJSON(url);
+      }
+    }
+
     // Buttons
     $("btnHealth").onclick = async () => {
       try {
@@ -213,26 +350,49 @@
       }
     };
 
-    $("btnSearch").onclick = async () => {
-      try {
-        status("Running /search…");
-        const url = `${$("baseUrl").value}/search?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}`;
-        const data = await fetchJSON(url);
-        $("searchWrap").style.display = "block";
-        $("searchJson").textContent = JSON.stringify(data, null, 2);
-        renderSources($("searchList"), (data.results || []).map(r => ({
-          paper_id: r.paper_id || r.id, title: r.title, score: r.score, url: r.url, pdf: r.pdf
-        })));
-        status("OK", "ok");
-      } catch (e) {
-        status(e.message, "err");
-      }
-    };
+    if ($("btnSearch")) {
+      $("btnSearch").onclick = async () => {
+        try {
+          status("Running /search…");
+          const url = `${$("baseUrl").value}/search?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}`;
+          const data = await fetchJSON(url);
+          $("searchWrap").style.display = "block";
+          $("searchJson").textContent = JSON.stringify(data, null, 2);
+          renderSources($("searchList"), (data.results || []).map(r => ({
+            paper_id: r.paper_id || r.id, title: r.title, score: r.score, url: r.url, pdf: r.pdf
+          })));
+          status("OK", "ok");
+        } catch (e) {
+          status(e.message, "err");
+        }
+      };
+    }
 
     $("btnAsk").onclick = async () => {
       try {
-        status("Running /ask…");
-        const url = `${$("baseUrl").value}/ask?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}&k_per_paper=${Number($("kPerPaper").value)}&style=${$("style").value}&include_context=${$("includeContext").value}`;
+        status("Running ask with selected search method…");
+        const q = $("q").value;
+        const k = Number($("k").value);
+        const kPerPaper = Number($("kPerPaper").value);
+        const rerank = $("chkRerank").checked;
+
+        // first run the selected search to get candidate papers
+        const searchData = await runSearchSelected({ q, k, k_per_paper: kPerPaper, rerank });
+        // show retriever results
+        $("searchWrap").style.display = "block";
+        $("searchJson").textContent = JSON.stringify(searchData, null, 2);
+  renderSearchResults($("searchList"), (searchData.results || []));
+
+  // collect paper ids and chunk ids to constrain the ask endpoint if supported
+  const paper_ids = (searchData.results || []).map(r => r.meta?.paper_id || r.paper_id || r.id).filter(Boolean);
+  // preserve chunk ids (for two_stage_search results that include chunk ids in r.id or r.meta.chunk_id)
+  const chunk_ids = (searchData.results || []).map(r => r.meta?.chunk_id || r.id).filter(Boolean);
+
+        // call /ask, preferring to pass paper_ids to constrain generation
+        const params = new URLSearchParams({ q: q, k: String(k), k_per_paper: String(kPerPaper), style: $("style").value, include_context: $("includeContext").value });
+  if (paper_ids.length) params.set('paper_ids', paper_ids.join(','));
+  if (chunk_ids.length) params.set('chunk_ids', chunk_ids.join(','));
+        const url = `${$("baseUrl").value}/ask?${params.toString()}`;
         const data = await fetchJSON(url);
         $("answerAsk").style.display = "block";
         $("askAnswer").textContent = data.answer || "";
@@ -249,13 +409,38 @@
 
     $("btnAskPro").onclick = async () => {
       try {
-        status("Running /ask_pro…");
-        const url = `${$("baseUrl").value}/ask_pro?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}&k_per_paper=${Number($("kPerPaper").value)}&style=${$("style").value}&include_context=${$("includeContext").value}&self_consistency_n=${Number($("selfN").value)}&min_sources=${Number($("minSources").value)}`;
+        status("Running pro_ask with selected search method…");
+        const q = $("q").value;
+        const k = Number($("k").value);
+        const kPerPaper = Number($("kPerPaper").value);
+        const rerank = $("chkRerank").checked;
+
+        const searchData = await runSearchSelected({ q, k, k_per_paper: kPerPaper, rerank });
+        $("searchWrap").style.display = "block";
+        $("searchJson").textContent = JSON.stringify(searchData, null, 2);
+  renderSearchResults($("searchList"), (searchData.results || []));
+
+  const paper_ids = (searchData.results || []).map(r => r.meta?.paper_id || r.paper_id || r.id).filter(Boolean);
+  const chunk_ids = (searchData.results || []).map(r => r.meta?.chunk_id || r.id).filter(Boolean);
+
+        const params = new URLSearchParams({ q: q, k: String(k), k_per_paper: String(kPerPaper), style: $("style").value, include_context: $("includeContext").value, self_consistency_n: String(Number($("selfN").value)), min_sources: String(Number($("minSources").value)) });
+  if (paper_ids.length) params.set('paper_ids', paper_ids.join(','));
+  if (chunk_ids.length) params.set('chunk_ids', chunk_ids.join(','));
+        const url = `${$("baseUrl").value}/ask_pro?${params.toString()}`;
         const data = await fetchJSON(url);
         $("answerAskPro").style.display = "block";
         $("askProAnswer").textContent = data.answer || "";
         $("askProCitations").innerHTML = (data.citations || []).map(c => `<span class="badge">[${c}]</span>`).join(" ");
+        // render final cited sources
         renderSources($("askProSources"), data.sources || []);
+        // render full candidate set (if provided) so users can compare
+        if (data.candidates && data.candidates.length) {
+          $("askProCandidatesWrap").style.display = 'block';
+          $("askProCandidatesWrap").innerHTML = '<div class="tiny muted">Candidates (retrieved, before LLM pruning)</div>';
+          renderSearchResults($("askProCandidatesWrap"), (data.candidates || []).map(c => ({ meta: { paper_id: c.paper_id, title: c.title }, paper_id: c.paper_id, id: c.paper_id, final_score: c.score || c.final_score || c.score })));
+        } else {
+          $("askProCandidatesWrap").style.display = 'none';
+        }
         renderQuotes($("askProQuotes"), data.quotes || []);
         renderSnippets($("askProSnippets"), data.snippets || []);
         if (data.gk && (data.gk.subquestions?.length || data.gk.terms?.length)) {
@@ -273,6 +458,87 @@
         status(e.message, "err");
       }
     };
+
+    // Debug handlers (retriever-only, no ask/pro)
+    $("dbgSearch").onclick = async () => {
+      try {
+        status('Running debug /search…');
+        const url = `${$("baseUrl").value}/search?q=${encodeURIComponent($("q").value)}&k=${Number($("k").value)}${$("dbgRerank").checked ? '&rerank=true' : ''}`;
+        const data = await fetchJSON(url);
+        $("searchWrap").style.display = "block";
+        $("searchJson").textContent = JSON.stringify(data, null, 2);
+        renderSources($("searchList"), (data.results || []).map(r => ( { paper_id: r.paper_id || r.id, title: r.title, score: r.score } )));
+        status('OK','ok');
+      } catch(e){ status(e.message,'err'); }
+    };
+
+    $("dbgTwoStage").onclick = async () => {
+      try {
+        status('Running debug /two_stage_search…');
+        const params = new URLSearchParams({ q: $("q").value, k: String(Number($("k").value)), k_per_paper: String(Number($("kPerPaper").value)), top_m: '75', paper_weight: '0.4', chunk_weight: '0.6', rerank: $("dbgRerank").checked ? 'true' : 'false' });
+        const url = `${$("baseUrl").value}/two_stage_search?${params.toString()}`;
+        const data = await fetchJSON(url);
+        $("searchWrap").style.display = "block";
+        $("searchJson").textContent = JSON.stringify(data, null, 2);
+        renderSources($("searchList"), (data.results || []).map(r => ({ paper_id: r.meta?.paper_id || r.paper_id || r.id, title: r.meta?.title || r.title, score: r.final_score ?? r.score })));
+        status('OK','ok');
+      } catch(e){ status(e.message,'err'); }
+    };
+
+    // Two-stage search button (only attach if element exists)
+    if ($("btnTwoStage")) {
+      $("btnTwoStage").onclick = async () => {
+        try {
+          status("Running /two_stage_search…");
+          const params = new URLSearchParams({
+            q: $("q").value,
+            k: String(Number($("k").value)),
+            k_per_paper: String(Number($("kPerPaper").value)),
+            top_m: '75',
+            paper_weight: '0.4',
+            chunk_weight: '0.6',
+            rerank: $("chkRerank").checked ? 'true' : 'false'
+          });
+          const url = `${$("baseUrl").value}/two_stage_search?${params.toString()}`;
+          const data = await fetchJSON(url);
+          $("searchWrap").style.display = "block";
+          $("searchJson").textContent = JSON.stringify(data, null, 2);
+          // retriever returns results with .meta and final_score sometimes
+          renderSources($("searchList"), (data.results || []).map(r => ({ paper_id: r.meta?.paper_id || r.paper_id || r.id, title: r.meta?.title || r.title, score: r.final_score ?? r.score })));
+          status("OK", "ok");
+        } catch (e) {
+          status(e.message, "err");
+        }
+      };
+    }
+
+    // Feature detection: probe two_stage_search; disable button if unavailable
+    (async function detectTwoStage(){
+      try{
+        const probe = await fetch(`${$("baseUrl").value}/two_stage_search?q=__probe__`);
+        if (!probe.ok) throw new Error('unavailable');
+        // leave enabled
+      }catch(e){
+        if ($("btnTwoStage")) {
+          $("btnTwoStage").disabled = true;
+          $("btnTwoStage").title = 'two_stage_search unavailable on server';
+        }
+      }
+    })();
+
+    // Check health and show LLM banner if not configured
+    (async function checkLLM(){
+      try{
+        const h = await fetchJSON(`${$("baseUrl").value}/healthz`);
+        if (!h.llm || !h.llm.enabled) {
+          $("llmBanner").style.display = 'block';
+        } else {
+          $("llmBanner").style.display = 'none';
+        }
+      }catch(e){
+        // ignore
+      }
+    })();
   </script>
 </body>
 </html>

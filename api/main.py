@@ -9,7 +9,16 @@ from dotenv import load_dotenv
 # Ensure .env overrides registry/shell for this process
 load_dotenv(override=True)
 
-from src.embed import get_embedding
+# import embedding helper with a fallback so repo layout differences don't crash the server
+try:
+    from src.embed import get_embedding
+except Exception:
+    try:
+        from embed import get_embedding
+    except Exception:
+        # get_embedding may be unavailable during startup; callers should handle failures
+        def get_embedding(texts):
+            raise RuntimeError("get_embedding not available; configure src.embed or embed.py")
 
 # ---------- Config ----------
 INDEX_PATH             = os.getenv("ARP_INDEX", "data/index.faiss")
@@ -21,7 +30,7 @@ CHUNKS_PER_PAPER_DEF   = int(os.getenv("ARP_CHUNKS_PER_PAPER", "2"))
 MAX_CTX_CHARS          = int(os.getenv("ARP_MAX_CTX_CHARS", "12000"))
 GK_ENABLED             = os.getenv("ARP_GK_ENABLED", "true").lower() in {"1","true","yes","on"}
 SC_N                   = int(os.getenv("ARP_SELF_CONSISTENCY_N", "3"))  # candidates to sample in voting
-MIN_DISTINCT_SOURCES   = int(os.getenv("ARP_MIN_DISTINCT_SOURCES", "1")) # enforce multi-source when available
+MIN_DISTINCT_SOURCES   = int(os.getenv("ARP_MIN_DISTINCT_SOURCES", "2")) # enforce multi-source when available (raise default to 2)
 
 # ---------- App ----------
 app = FastAPI(title="ARPack API", version="0.5.1")
@@ -30,6 +39,7 @@ app.mount("/ui", StaticFiles(directory="ui_static", html=True), name="ui")
 _index = None
 _meta  = None
 _is_chunk_index = False
+_two_stage_retriever = None
 
 # ---------- OpenAI (lazy) ----------
 _OPENAI_CLIENT = None
@@ -42,6 +52,16 @@ def _client():
 
 def _llm_enabled() -> bool:
     return bool((os.getenv("OPENAI_API_KEY") or "").strip())
+
+
+def _validate_embedding_shape(vec, idx) -> None:
+    """Raise HTTPException if embedding shape doesn't match index dim."""
+    try:
+        shape = getattr(vec, 'shape', None)
+        if shape is None or shape[1] != idx.d:
+            raise RuntimeError(f"Embedding dimension mismatch: got {shape}, expected {idx.d}. Rebuild indexes with the same embedding model.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ---------- Load index/meta ----------
 def _load():
@@ -61,6 +81,17 @@ def _load():
 @app.on_event("startup")
 def startup_event():
     _load()
+    # preload optional two-stage retriever if scripts are available
+    try:
+        tre = _get_two_stage_retriever()
+        if tre is not None:
+            # set sensible defaults
+            tre.top_m_papers = int(os.getenv("ARP_TOP_M_PAPERS", "75"))
+            tre.mix_weights = (float(os.getenv("ARP_PAPER_WEIGHT", "0.4")), float(os.getenv("ARP_CHUNK_WEIGHT", "0.6")))
+            global _two_stage_retriever
+            _two_stage_retriever = tre
+    except Exception:
+        pass
 
 # ---------- Small helpers ----------
 def _add_links(rec: Dict[str, Any]) -> None:
@@ -96,6 +127,39 @@ def _extract_citations(text: str) -> List[str]:
     # [2508.12345v1] style citations
     return sorted(set(re.findall(r"\[(\d{4}\.\d{5}(?:v\d+)?)\]", text)))
 
+
+def _lexical_rerank(query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Simple lexical reranker used when `rerank=true` is requested on /search.
+    This is intentionally lightweight: counts token matches in title/summary/text
+    and boosts items with lexical overlap. Returns a re-ordered list.
+    """
+    qs = [t.strip().lower() for t in re.split(r"\s+", query) if t.strip()]
+    if not qs or not results:
+        return results
+
+    scores = []
+    max_count = 1
+    for r in results:
+        text = " ".join([str(r.get(k, "")) for k in ("title", "summary", "text")])
+        text = text.lower()
+        cnt = sum(text.count(qtok) for qtok in qs)
+        scores.append(cnt)
+        if cnt > max_count:
+            max_count = cnt
+
+    out = []
+    for r, cnt in zip(results, scores):
+        lex_norm = cnt / max_count if max_count > 0 else 0.0
+        # combine original vector score (if present) with lexical score
+        vec_score = float(r.get("score") or 0.0)
+        final = vec_score * 0.75 + lex_norm * 0.25
+        new = dict(r)
+        new["score"] = final
+        out.append(new)
+
+    out.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+    return out
+
 # ---------- Retrieval ----------
 def _retrieve_hits(q: str, k: int, k_per_paper: int, multiqueries: Optional[List[str]] = None) -> Tuple[List[Dict[str,Any]], List[str]]:
     """
@@ -113,6 +177,7 @@ def _retrieve_hits(q: str, k: int, k_per_paper: int, multiqueries: Optional[List
 
     # embed all queries at once
     Q = get_embedding(vecs)
+    _validate_embedding_shape(Q, _index)
     faiss.normalize_L2(Q)
 
     # search for each query; gather raw hits
@@ -344,6 +409,94 @@ def _synthesize_answer(q: str, quotes: List[Dict[str,str]], top_pid: str, style:
 
     return best, _extract_citations(best)
 
+
+# ---------- Optional two-stage retriever bridge ----------
+def _get_two_stage_retriever(paper_index_path=None, paper_meta=None, chunk_index_path=None, chunk_meta=None):
+    """Lazily import and construct TwoStageRetriever from scripts/two_stage_retriever.py if available.
+    Returns None if not importable.
+    """
+    try:
+        import importlib.util, sys, os
+        # locate the helper script: prefer scripts/two_stage_retriever.py but also
+        # accept a repo-root two_stage_retriever.py (different repo layouts)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        script_path_candidates = [
+            os.path.join(repo_root, "scripts", "two_stage_retriever.py"),
+            os.path.join(repo_root, "two_stage_retriever.py"),
+        ]
+        script_path = None
+        for p in script_path_candidates:
+            if os.path.exists(p):
+                script_path = p
+                break
+        if script_path is None:
+            return None
+        spec = importlib.util.spec_from_file_location("two_stage_retriever", script_path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        TwoStageRetriever = getattr(mod, "TwoStageRetriever")
+        # Resolve defaults if caller didn't provide explicit paths (safe for startup preload)
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        paper_index_path = paper_index_path or os.getenv("ARP_PAPER_INDEX", os.path.join(repo_root, "data", "index_papers.faiss"))
+        paper_meta = paper_meta or os.getenv("ARP_PAPER_META", paper_index_path + ".meta.json")
+        chunk_index_path = chunk_index_path or os.getenv("ARP_INDEX", os.path.join(repo_root, "data", "index.faiss"))
+        chunk_meta = chunk_meta or os.getenv("ARP_META", chunk_index_path + ".meta.json")
+
+        # If expected index files don't exist, avoid instantiating (preload is optional)
+        if not (os.path.exists(paper_index_path) and os.path.exists(chunk_index_path)):
+            return None
+
+        # instantiate using the helper's expected parameter names (positional)
+        return TwoStageRetriever(paper_index_path, paper_meta, chunk_index_path, chunk_meta)
+    except Exception:
+        return None
+
+
+@app.get("/two_stage_search")
+def two_stage_search(
+    q: str = Query(...),
+    k: int = Query(8, ge=1, le=50),
+    paper_index: str | None = None,
+    paper_meta: str | None = None,
+    chunk_index: str | None = None,
+    chunk_meta: str | None = None,
+    top_m: int = Query(75, ge=1, le=500),
+    paper_weight: float = Query(0.4, ge=0.0, le=1.0),
+    chunk_weight: float = Query(0.6, ge=0.0, le=1.0),
+    k_per_paper: int = Query(2, ge=1, le=10),
+    rerank: bool = Query(False),
+) -> Dict[str, Any]:
+    """Run the two-stage retriever (paper-level coarse -> chunk-level fine).
+    This endpoint is optional and requires the `scripts/two_stage_retriever.py` helper to be present.
+    """
+    # Resolve defaults from env if not provided
+    paper_index = paper_index or os.getenv("ARP_PAPER_INDEX", "data/index_papers.faiss")
+    paper_meta = paper_meta or os.getenv("ARP_PAPER_META", paper_index + ".meta.json")
+    chunk_index = chunk_index or os.getenv("ARP_INDEX", "data/index.faiss")
+    chunk_meta = chunk_meta or os.getenv("ARP_META", chunk_index + ".meta.json")
+
+    retr = _get_two_stage_retriever(paper_index_path=paper_index, paper_meta=paper_meta, chunk_index_path=chunk_index, chunk_meta=chunk_meta)
+    if retr is None:
+        # return a 200 with available:false so clients can feature-detect without handling 500s
+        return {"query": q, "k": k, "available": False, "results": []}
+
+    # apply runtime tuning into the retriever instance
+    try:
+        retr.top_m_papers = int(top_m)
+        retr.mix_weights = (float(paper_weight), float(chunk_weight))
+    except Exception:
+        # ignore tuning failures
+        pass
+    results = retr.retrieve(q, k=k, k_per_paper=k_per_paper)
+    # optional lightweight TF-IDF rerank at the client request
+    if rerank:
+        try:
+            results = retr.rerank_by_tfidf(q, results)
+        except Exception:
+            pass
+    return {"query": q, "k": k, "results": results}
+
 # ---------- Routes ----------
 @app.get("/")
 def root():
@@ -351,11 +504,27 @@ def root():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "index_path": INDEX_PATH, "meta_path": META_PATH, "chunk_mode": _is_chunk_index}
+    # include two-stage retriever readiness and config when available
+    tsr_info = None
+    try:
+        if _two_stage_retriever is not None:
+            tsr_info = {
+                "loaded": True,
+                "top_m_papers": getattr(_two_stage_retriever, "top_m_papers", None),
+                "mix_weights": getattr(_two_stage_retriever, "mix_weights", None)
+            }
+        else:
+            tsr_info = {"loaded": False}
+    except Exception:
+        tsr_info = {"loaded": False}
+    # expose whether LLM (OpenAI) is configured so the UI can show helpful guidance
+    llm = {"enabled": _llm_enabled()}
+    return {"ok": True, "index_path": INDEX_PATH, "meta_path": META_PATH, "chunk_mode": _is_chunk_index, "two_stage": tsr_info, "llm": llm}
 
 @app.get("/search")
-def search(q: str = Query(...), k: int = Query(5, ge=1, le=50)) -> Dict[str, Any]:
+def search(q: str = Query(...), k: int = Query(5, ge=1, le=50), rerank: bool = Query(False)) -> Dict[str, Any]:
     vec = get_embedding([q])
+    _validate_embedding_shape(vec, _index)
     faiss.normalize_L2(vec)
     D, I = _index.search(vec, k)
 
@@ -368,6 +537,13 @@ def search(q: str = Query(...), k: int = Query(5, ge=1, le=50)) -> Dict[str, Any
         rec["id"] = _meta["ids"][idx]
         _add_links(rec)
         results.append(rec)
+
+    if rerank:
+        try:
+            results = _lexical_rerank(q, results)
+        except Exception:
+            pass
+
     return {"query": q, "k": k, "results": results}
 
 # Your earlier structured /ask (kept; now feeds XML ctx too)
@@ -377,10 +553,48 @@ def ask(
     k: int = Query(6, ge=1, le=50),
     k_per_paper: int | None = Query(None, ge=1, le=10),
     include_context: bool = Query(False),
-    style: str = Query("concise")
+    style: str = Query("concise"),
+    paper_ids: str | None = Query(None),
+    chunk_ids: str | None = Query(None),
 ) -> Dict[str, Any]:
     chunks_per = k_per_paper or CHUNKS_PER_PAPER_DEF
-    hits, used_queries = _retrieve_hits(q, k, chunks_per)
+    # If client provided explicit paper_ids, constrain retrieval to those
+    if paper_ids:
+        ids = [p.strip() for p in paper_ids.split(',') if p.strip()]
+        # If client also provided explicit chunk_ids (from two_stage_search), honor those
+        hits = []
+        if chunk_ids:
+            cids = [c.strip() for c in chunk_ids.split(',') if c.strip()]
+            # build a fast map from index id -> meta index
+            ids_map = { _meta.get('ids', [])[i]: i for i in range(len(_meta.get('ids', []))) }
+            for cid in cids:
+                idx = ids_map.get(cid)
+                if idx is None:
+                    continue
+                meta = _meta.get('meta', [])[idx]
+                rec = dict(meta)
+                rec['score'] = 1.0
+                rec['id'] = _meta.get('ids', [])[idx]
+                hits.append(rec)
+        else:
+            # best-effort: preserve order of provided paper ids and include up to `chunks_per` chunks per paper
+            per_added = {pid: 0 for pid in ids}
+            for pid in ids:
+                if per_added.get(pid, 0) >= chunks_per:
+                    continue
+                for i, meta in enumerate(_meta.get('meta', [])):
+                    m_pid = meta.get('paper_id') or meta.get('id') or _meta.get('ids', [])[i]
+                    if m_pid == pid:
+                        rec = dict(meta)
+                        rec['score'] = 1.0
+                        rec['id'] = _meta.get('ids', [])[i]
+                        hits.append(rec)
+                        per_added[pid] = per_added.get(pid, 0) + 1
+                        if per_added[pid] >= chunks_per:
+                            break
+        used_queries = [q]
+    else:
+        hits, used_queries = _retrieve_hits(q, k, chunks_per)
     if not hits:
         return {"query": q, "k": k, "results": [], "sources": [], "snippets": [], "answer": "No results."}
 
@@ -429,6 +643,8 @@ def ask_pro(
     style: str = Query("concise"),
     self_consistency_n: int | None = Query(None, ge=1, le=7),
     min_sources: int | None = Query(None, ge=1, le=5),
+    paper_ids: str | None = Query(None),
+    chunk_ids: str | None = Query(None),
 ) -> Dict[str, Any]:
     """
     Advanced pipeline:
@@ -446,9 +662,89 @@ def ask_pro(
     multiqueries = ([q] + expansions) if expansions else [q]
 
     # (2) Retrieval (union) + diversification
-    hits, used_queries = _retrieve_hits(q, k, chunks_per, multiqueries=multiqueries)
+    # Prefer the two-stage retriever when available (paper-stage coarse -> chunk-stage fine)
+    used_queries = [q]
+    if expansions:
+        used_queries = [q] + expansions
+
+    retr = _get_two_stage_retriever()
+    if paper_ids:
+        # If explicit paper_ids passed we will prefer to build hits from them.
+        ids = [p.strip() for p in paper_ids.split(',') if p.strip()]
+        hits = []
+        # If client also provided explicit chunk_ids (from two_stage_search), honor those
+        if chunk_ids:
+            cids = [c.strip() for c in chunk_ids.split(',') if c.strip()]
+            ids_map = { _meta.get('ids', [])[i]: i for i in range(len(_meta.get('ids', []))) }
+            for cid in cids:
+                idx = ids_map.get(cid)
+                if idx is None:
+                    continue
+                meta = _meta.get('meta', [])[idx]
+                rec = dict(meta)
+                rec['score'] = 1.0
+                rec['id'] = _meta.get('ids', [])[idx]
+                hits.append(rec)
+        else:
+            # best-effort: preserve order of provided paper ids and include up to `chunks_per` chunks per paper
+            per_added = {pid: 0 for pid in ids}
+            for pid in ids:
+                if per_added.get(pid, 0) >= chunks_per:
+                    continue
+                for i, meta in enumerate(_meta.get('meta', [])):
+                    m_pid = meta.get('paper_id') or meta.get('id') or _meta.get('ids', [])[i]
+                    if m_pid == pid:
+                        rec = dict(meta)
+                        rec['score'] = 1.0
+                        rec['id'] = _meta.get('ids', [])[i]
+                        hits.append(rec)
+                        per_added[pid] = per_added.get(pid, 0) + 1
+                        if per_added[pid] >= chunks_per:
+                            break
+        used_queries = [q]
+    else:
+        if retr is not None:
+            try:
+                # apply reasonable runtime tuning (can be adjusted via env or caller)
+                retr.top_m_papers = int(os.getenv("ARP_TOP_M_PAPERS", "75"))
+                retr.mix_weights = (float(os.getenv("ARP_PAPER_WEIGHT", "0.4")), float(os.getenv("ARP_CHUNK_WEIGHT", "0.6")))
+                # if GK expansions exist, run multi-query union; otherwise single-query retrieve
+                if len(multiqueries) > 1:
+                    hits = retr.multi_query_union(multiqueries, k=k, k_per_paper=chunks_per)
+                    used_queries = multiqueries
+                else:
+                    hits = retr.retrieve(q, k=k, k_per_paper=chunks_per)
+                    used_queries = [q]
+            except Exception:
+                hits, used_queries = _retrieve_hits(q, k, chunks_per, multiqueries=multiqueries)
+        else:
+            hits, used_queries = _retrieve_hits(q, k, chunks_per, multiqueries=multiqueries)
     if not hits:
         return {"query": q, "k": k, "results": [], "sources": [], "snippets": [], "answer": "No results.", "used_queries": used_queries}
+
+    # Normalize hits that come from the two-stage retriever helper which returns
+    # items like {"meta": {...}, "score": ..., "ridx": ..., "final_score": ...}
+    # into the shape expected elsewhere in this module (top-level 'id', 'paper_id', 'title', 'score').
+    for h in hits:
+        if isinstance(h, dict) and "meta" in h and isinstance(h["meta"], dict):
+            meta = h.get("meta") or {}
+            # prefer existing top-level id, otherwise map from meta
+            if "id" not in h or not h.get("id"):
+                h["id"] = meta.get("chunk_id") or meta.get("id") or meta.get("paper_id")
+            if "paper_id" not in h or not h.get("paper_id"):
+                h["paper_id"] = meta.get("paper_id") or meta.get("id")
+            if "title" not in h or not h.get("title"):
+                title = meta.get("title") or meta.get("paper_title")
+                if title:
+                    h["title"] = title
+            # prefer explicit final_score if provided
+            if "score" not in h or h.get("score") is None:
+                h["score"] = h.get("final_score", 0.0)
+            # ensure numeric types
+            try:
+                h["score"] = float(h.get("score", 0.0))
+            except Exception:
+                h["score"] = 0.0
 
     sources = _build_sources([hits[0]] + hits[1:])
     context_blocks, snippets = _load_texts_for_hits(hits)
@@ -503,6 +799,13 @@ def ask_pro(
         "answer": best_answer, "citations": cited, "used_queries": used_queries,
         "gk": gk, "quotes": quotes
     }
+    # Preserve the full candidate set separately so clients can display it even
+    # if `sources` is pruned to only those actually cited by the LLM.
+    payload["candidates"] = list(sources)
+    # Prune `sources` to only those actually cited in the final answer to avoid noisy tangential papers
+    if cited:
+        cited_set = set(cited)
+        payload["sources"] = [s for s in sources if s.get("paper_id") in cited_set]
     if include_context:
         payload["context_blocks"] = context_blocks
     return payload
