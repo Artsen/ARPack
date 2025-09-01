@@ -1,5 +1,7 @@
 # ARPack — ArXiv Research Pack (Two‑Stage RAG Edition)
 
+![UI screenshot](screenshot.webp)
+
 A compact, portfolio‑ready pipeline that fetches recent arXiv papers, **hydrates + chunks** full texts, summarizes with an LLM into a rich schema, builds **embeddings + FAISS**, and serves **search & advanced RAG Q\&A** via FastAPI — with a no‑build static UI at `/ui`.
 
 > Designed to be extended into your broader research/RAG stack. Now with **optional two‑stage retrieval** (paper → chunk), **quote‑only synthesis**, **self‑consistency voting**, and **minimum‑sources enforcement** for stronger answers.
